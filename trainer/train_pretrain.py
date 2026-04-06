@@ -15,7 +15,7 @@ from torch import optim  # 优化器
 from torch.nn.parallel import DistributedDataParallel  # 分布式数据并行
 from torch.utils.data import DataLoader, DistributedSampler  # 数据加载器
 
-from model.model import MyMinimind
+from model.model import MyMinimindConfig
 from dataset.lm_dataset import PretrainDataset
 from trainer.train_utils import (  # 训练工具函数
     get_lr,
@@ -57,7 +57,8 @@ def train_epoch(epoch, loader, iters, start_step=0, wandb=None):
             )  # ！修正：直接传入labels和attention_mask，由模型内部计算loss
 
             loss = (
-                res.loss + res.aux_loss
+                # res.loss + res.aux_loss
+                res.loss
             )  # ！修正：原手动计算loss_fct+loss_mask，现用模型内置的loss
 
             loss = loss / args.accumulation_steps
@@ -184,7 +185,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--data_path",
         type=str,
-        default="../dataset/pretrain_hq.jsonl",  # ！修正：原"dataset/..."缺少../前缀
+        default="./dataset/pretrain_t2t_mini.jsonl",  # ！修正：原"dataset/..."缺少../前缀
         help="预训练数据路径",
     )
     parser.add_argument(
@@ -236,7 +237,7 @@ if __name__ == "__main__":
     os.makedirs(args.save_dir, exist_ok=True)  # 确保保存目录存在
 
     # 创建MiniMind模型配置
-    lm_config = MyMinimind(
+    lm_config = MyMinimindConfig(
         hidden_size=args.hidden_size,
         num_hidden_layers=args.num_hidden_layers,
         use_moe=bool(args.use_moe),

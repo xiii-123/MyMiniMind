@@ -288,7 +288,7 @@ class Attention(nn.Module):
 
                 # deal with causal attention mask
                 scores[:, :, :, -seq_len:] += torch.triu(
-                    torch.full((seq_len, seq_len), float('-inf'), scores.device),
+                    torch.full((seq_len, seq_len), float('-inf'), dtype=scores.dtype, device=scores.device),
                     diagonal=1 
                 )
 
@@ -318,10 +318,10 @@ class FeedForward(nn.Module):
         
         # init down_proj, up_proj, gate_proj
         self.up_proj = nn.Linear(
-            config.hidden_size, intermediate_size, bias=False
+            config.hidden_size, config.intermediate_size, bias=False
         )
         self.gate_proj = nn.Linear(
-            config.hidden_size, intermediate_size, bias=False
+            config.hidden_size, config.intermediate_size, bias=False
         )
         self.down_proj = nn.Linear(
             config.intermediate_size, config.hidden_size, bias=False

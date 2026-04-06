@@ -133,7 +133,7 @@ def init_model(
     device="cuda",
 ):
     from transformers import AutoTokenizer
-    from model.MokioModel import MokioMindForCausalLM
+    from model.model import MyMinimindForCausalLm
 
     # 如果没有指定 tokenizer_path，使用项目根目录下的 model 文件夹
     if tokenizer_path is None:
@@ -144,7 +144,7 @@ def init_model(
 
     tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
 
-    model = MokioMindForCausalLM(lm_config)
+    model = MyMinimindForCausalLm(lm_config)
 
     if from_weight != "none":
         moe_suffix = (
