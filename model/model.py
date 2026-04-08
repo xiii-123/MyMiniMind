@@ -400,6 +400,89 @@ class FeedForward(nn.Module):
         gated = self.act_fn(self.gate_proj(x)) * self.up_proj(x)
         return self.dropout(self.down_proj(gated))
     
+class MoeFeedForward(nn.Module):
+    def __init__(self, config: MyMinimindConfig):
+        super().__init__()
+        self.config = config
+
+        # experts
+        self.experts = nn.ModuleList(
+            [FeedForward(config) for _ in range(config.n_routed_experts)]
+        )
+
+        # moe gate
+        self.gate = MoeGate(config)
+        if config.n_shared_experts > 0:
+            self.shared_experts = nn.ModuleList(
+                [FeedForward(config) for _ in range(config.n_shared_experts)]
+            )
+    
+    def forward(self, x):
+        identity = x
+        orig_shape = x.shape
+        bsz, seq_len, h = orig_shape
+
+        # use moe gate to get topk expert index and weight
+        topk_idx, topk_weight, aux_loss = self.gate(x)
+        # flatten input and index for gathering
+        x = x.view(-1, x.shape[-1])
+
+        flat_topk_idx = topk_idx.view(-1)
+        if self.training:
+            # repeat input for topk experts and compute expert output
+            x = x.repeat_interleave(self.config.top_k, dim=0)
+            y = torch.zeros_like(x)
+            # traverse each expert and compute output for samples routed to it
+            for i, expert in enumerate(self.experts):
+                expert_out = expert(x[flat_topk_idx == i])
+                if expert_out.shape[0] > 0:
+                    y[flat_topk_idx == i] = expert_out.to(y.dtype)
+                else:
+                    y[flat_topk_idx == i] = expert_out.to(y.dtype) + 0 * sum(
+                        p.sum() for p in expert.parameters()
+                    )
+            y = (y.view(*topk_weight.shape, -1) * topk_weight.unsqueeze(-1)).sum(dim=2)
+            y = y.view(*orig_shape)
+        else:
+            y = self.moe_infer(x, flat_topk_idx, topk_weight.view(-1, 1)).view(*orig_shape)
+        if self.config.n_shared_experts > 0:
+            for expert in self.shared_experts:
+                y = y + expert(identity)
+        self.aux_loss = aux_loss
+        return y
+    
+    @torch.no_grad()
+    def moe_infer(self, x, flat_expert_indices, flat_expert_weights):
+        expert_cache = torch.zeros_like(x)
+
+        # sort experts index, like[0,0,1,1,2]
+        idx = flat_expert_indices.argsort()
+
+        # Calculate the prefix sum of each expert's assigned token., like [2,3,4]
+        tokens_per_expert = flat_expert_indices.bincount().cpu().numpy().cumsum(0)
+
+        # Calculate the token index for each expert after sorting.
+        token_idx = idx // self.config.num_experts_per_tok
+
+        for i, end_idx in enumerate(tokens_per_expert):
+            # calculate the start index and end index for current expert
+            start_idx = 0 if i == 0 else tokens_per_expert[i - 1]
+            if start_idx >= end_idx:
+                continue
+            expert = self.experts[i]
+            # get the input for current expert and compute output
+            exp_token_idx = token_idx[start_idx:end_idx]
+            exp_input = x[exp_token_idx]
+            expert_out = expert(exp_input).to(expert_cache.dtype)
+            # scatter the expert output to the corresponding position in the output cache
+            expert_out.mul(flat_expert_weights[idx[start_idx:end_idx]])
+            expert_cache.scatter_add(
+                0, exp_token_idx.view(-1, 1).repeat(1, x.shape[-1]), expert_out
+            )
+        return expert_cache
+
+
+
 class MyMinimindBlock(nn.Module):
     def __init__(self, layer_id: int, config: MyMinimindConfig):
         super().__init__()
@@ -512,7 +595,18 @@ class MyMinimindModel(nn.Module):
 
         hidden_states = self.norm(hidden_states)
 
-        return hidden_states, presents
+        aux_loss = sum(
+            [
+                layer.mlp.aux_loss
+                for layer in self.layers
+                if isinstance(
+                    layer.mlp, MoeFeedForward
+                )  # ！修正：原MoEFeedForaward拼写错误
+            ],
+            hidden_states.new_zeros(1).squeeze(),
+        )
+
+        return hidden_states, presents, aux_loss
     
 class MyMinimindForCausalLm(PreTrainedModel, GenerationMixin):
     config_class = MyMinimindConfig
@@ -559,7 +653,7 @@ class MyMinimindForCausalLm(PreTrainedModel, GenerationMixin):
             )
 
         return CausalLMOutputWithPast(
-            loss,  
+            loss=loss,  
             logits=logits,
             past_key_values=past_key_values,
             hidden_states=hidden_states,
